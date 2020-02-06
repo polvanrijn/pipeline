@@ -1,0 +1,183 @@
+---
+title: "Compare manual and automatic transcription"
+subtitle: "Estimate the error"
+author: "Pol van Rijn"
+date: "`r Sys.Date()`"
+output:
+  tufte::tufte_html: default
+editor_options: 
+  chunk_output_type: console
+# bibliography: /Users/pol.van-rijn/MPI/02_running_projects/02_PhD/Papers/dynamic_features/References/library.bib
+---
+<link rel="stylesheet" href="/Users/pol.van-rijn/MPI/04_misc/R/Tufte/extra.css"/>
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(tidy = FALSE, echo=T, results='hide', message=FALSE)
+```
+
+First load some important libraries
+```{r}
+library(dplyr)
+library(contouR)
+library(ggplot2)
+library(rPraat)
+path = paste0( Sys.getenv("PT_DIR"), "Corpora/PELL/Annotation/")
+```
+
+Define some functions that make our life easier
+```{r functions}
+get_tg_filnames = function(path){
+  files = list.files(path)
+  return(files[grep('.TextGrid', files)])
+}
+
+clean_labels = function(labels){
+  if (length(which(labels == "")) == 0){
+    empty_idx = c()
+  } else {
+    empty_idx = which(labels == "")
+  }
+  label_idx = which(labels != "")
+  
+  labels = labels[labels != ""]
+  labels = tolower(labels)
+  
+  return(list(labels = labels, label_idx = label_idx, empty_idx = empty_idx))
+}
+
+remove_first_and_last = function(ts){
+  ts = ts[-1] # remove first
+  ts = ts[1:(length(ts) - 1)]
+  return(ts)
+}
+
+compute_benchmark = function(ts1, ts2, label){
+  
+  return(
+    rbind(df, data.frame(
+      RMSE = contouR::RMSE(ts1, ts2),
+      RMSE_clean = contouR::RMSE(remove_first_and_last(ts1), remove_first_and_last(ts2)),
+      correlation = cor(ts1, ts2),
+      label = label
+    ))
+  )
+}
+```
+
+Now go through all TextGrids and compare manual annotation against *WebMaus* automatic transcription.
+
+```{r compare_tgs, results='', cache = TRUE}
+filenames_old = get_tg_filnames(paste0(path, "04_completed"))
+filenames_new = get_tg_filnames(paste0(path, "TextGrids"))
+
+df = NULL
+diffs = NULL
+not_computed = c()
+for (fn in filenames_old){
+  st_split = strsplit(fn, "_")[[1]]
+  old_tg = tg.read(paste0(path, "04_completed/", fn), 'auto')
+  temp = clean_labels(old_tg$words$label)
+  old_labels = temp$label
+  old_label_idx = temp$label_idx
+  
+  new_tg = tg.read(paste0(path, "TextGrids/", fn), 'auto')
+  temp = clean_labels(new_tg$`ORT-MAU`$label)
+  new_labels = temp$label
+  new_label_idx = temp$label_idx
+  
+  if (!all(c(length(old_labels) == length(new_labels), old_labels == new_labels))){
+    #warning(paste(fn, "labels do not match!"))
+    not_computed = c(not_computed, fn)
+  } else{
+    t1_old = old_tg$words$t1[old_label_idx] * 1000
+    t1_new = new_tg$`ORT-MAU`$t1[new_label_idx]  * 1000
+    
+    t2_old = old_tg$words$t2[old_label_idx] * 1000
+    t2_new = new_tg$`ORT-MAU`$t2[new_label_idx] * 1000
+    
+    dur_old = t2_old - t1_old
+    dur_new = t2_new - t1_new
+    
+    diffs = rbind(diffs, data.frame(
+      diff = dur_new - dur_old,
+      word_idx = 1:length(dur_old),
+      sentence = st_split[3],
+      emotion = st_split[2],
+      speaker = st_split[1]
+    ))
+    
+    df = compute_benchmark(t1_old, t1_new, "T1")
+    df = compute_benchmark(t2_old, t2_new, "T2")
+    df = compute_benchmark(dur_old, dur_new, "duration")
+  }
+}
+
+if (length(not_computed) == 0){
+  print('All TextGrids were annotated')
+} else{
+  print(paste(length(not_computed), "TextGrids could not be computed"))
+}
+
+```
+
+Let's have a look at the data:
+
+```{r preview_data, results='', cache = TRUE}
+df$correlation = abs(df$correlation)
+knitr::kable(head(df))
+```
+
+The first benchmark we use are correlations, however, this might not be the appropriate measure to asses the annotation accuracy, because time always evolves over the course of a fragment, so time stamps of words should always be positively correlated. However, this is not the case for duration: the correlation is not exactly 1, but still yields a fairly high median correlation (.96). But when we look at the plot, we can see quite some outliers (this is also why the arithmetic mean is lower: .89)
+
+```{r plot_correlations, results='', fig.fullwidth = TRUE, fig.width = 10, fig.height = 4, fig.cap = "Correlation between starting times (T1), ending times (T2) and durations of words across the manually corrected and automatically created TextGrids.", cache = TRUE}
+ggplot(df) +
+  geom_boxplot(aes(y = correlation, x = label)) +
+  ylim(0, 1)
+
+median(filter(df, label == "duration")$correlation)
+mean(filter(df, label == "duration")$correlation)
+```
+
+The median RMSE is about 75ms for duration, 37ms for T1 and 63 ms for T2. Please note that some artifacts are introduced by removing all sentence initial and sentence final pauses from the manually annotated TextGrids.
+
+```{r plot_results, results='', fig.fullwidth = TRUE, fig.width = 10, fig.height = 4, fig.cap = "Root mean square error between starting times (T1), ending times (T2) and durations of words across the manually corrected and automatically created TextGrids.", cache = TRUE}
+
+ggplot(df) +
+  geom_boxplot(aes(y = RMSE, x = label)) +
+  ylab("RMSE in miliseconds")
+
+knitr::kable(df %>% group_by(label) %>% summarise(median(RMSE)))
+```
+
+To exemplify this, we can plot the word differences per sentence.
+```{r fig.fullwidth = TRUE, fig.width = 10, fig.height = 10, fig.cap = "Word duration differences for the manually corrected and automatically created TextGrids.", cache = TRUE}
+diffs$diff = abs(diffs$diff)
+diffs$word_idx = as.factor(diffs$word_idx)
+ggplot(diffs) +
+  geom_boxplot(aes(x = word_idx, y = diff)) +
+  facet_wrap(~ sentence)
+
+```
+
+As we can see in the plot the highest duration differences are mainly on the first or last word. We can also quantify this: 90 % of all sentences have the largest word duration difference for the last word of the sentence (which is due to removing the final pause). In the remaining 10 % of all sentences the first word has the largest word duration difference, which again is due to a pause (this time at the start of the sentence). 
+
+```{r, results=''}
+pos_of_max = as.data.frame(diffs %>% group_by(sentence, word_idx) %>% summarise(mean_diff = mean(diff)) %>% group_by(sentence) %>% summarise(max_pos = which(mean_diff == max(mean_diff)), len = length(word_idx)))
+
+length(which(pos_of_max$max_pos == pos_of_max$len))/nrow(pos_of_max)
+
+length(which(pos_of_max$max_pos == 1))/nrow(pos_of_max)
+```
+
+Based on these results we can rerun the RMSE, but now on all words *except* the first and last word:
+
+```{r plot_clean_RMSE, results='', fig.fullwidth = TRUE, fig.width = 10, fig.height = 4, fig.cap = "Root mean square error on T1, T2 and duration of words (except first and last word) across the manually corrected and automatically created TextGrids.", cache = TRUE}
+
+ggplot(df) +
+  geom_boxplot(aes(y = RMSE_clean, x = label)) +
+  ylab("RMSE in miliseconds")
+
+knitr::kable(df %>% group_by(label) %>% summarise(median(RMSE_clean)))
+```
+
+The results make more sense, since there was a big gap between *T1* and *T2* in the 'unclean' version. This gap is now almost closed (20 vs 33 ms). Also the difference between words in more acceptable 41 ms.
+

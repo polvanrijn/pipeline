@@ -1,0 +1,57 @@
+---
+title: "Estimate Fujisaki parameters"
+subtitle: "Run interpolate.exe via ssh"
+author: "Pol van Rijn"
+date: "`r Sys.Date()`"
+output:
+  tufte::tufte_html: default
+editor_options: 
+  chunk_output_type: console
+bibliography: /Users/pol.van-rijn/MPI/02_running_projects/02_PhD/Papers/dynamic_features/References/library.bib
+---
+<link rel="stylesheet" href="/Users/pol.van-rijn/MPI/04_misc/R/Tufte/extra.css"/>
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(tidy = FALSE, echo = T, results = 'hide', message = FALSE)
+```
+
+The first step is to note the gender of all speakers:
+
+```{r}
+path = paste0( Sys.getenv("PT_DIR"), "Corpora/")
+host = 'pol@127.0.0.1:2222'
+passwd = 'test'
+library(contouR)
+corpus_path = paste0(path, "PELL/")
+new_path = paste0(corpus_path, 'Meta-data/Old_ascii/')
+old_path = paste0(corpus_path, 'Meta-data/Old_Fujisaki/')
+```
+
+This takes quite some time to complete, so I uncommented it
+```{r run_interpolate, cache=TRUE}
+#files = list.files(f0_ascii_path)
+#files = stringr::str_split_fixed(files[grepl('.f0_ascii', files)], '.f0_ascii', 2)[,1]
+#contouR::estimate_fujisaki_parameters(files, f0_ascii_path, host, passwd)
+```
+
+Compare old against new, we can see it reproduces in all execpt for four cases:
+```{r compare, warning=TRUE, results=''}
+new_PAC_files = list.files(new_path, "*.PAC")
+old_PAC_files = list.files(old_path, "*.PAC")
+
+if (length(old_PAC_files) != length(new_PAC_files)) {
+  stop("Unequal number of PAC files")
+}
+
+for (PAC_name in new_PAC_files) {
+  new_PAC = read_pac_file(paste0(new_path, PAC_name))
+  old_PAC = read_pac_file(paste0(old_path, PAC_name))
+  
+  if (!identical(new_PAC, old_PAC)) {
+    warning(PAC_name)
+    
+    print(knitr::kable(new_PAC$df))
+    print(knitr::kable(old_PAC$df))
+  }
+}
+```
+

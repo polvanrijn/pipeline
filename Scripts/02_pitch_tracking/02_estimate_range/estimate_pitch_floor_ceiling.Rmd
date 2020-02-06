@@ -1,0 +1,395 @@
+---
+title: "Estimate pitch floor and ceiling"
+subtitle: "Find the best floor and ceiling"
+author: "Pol van Rijn"
+date: "`r Sys.Date()`"
+output:
+  tufte::tufte_html: default
+editor_options: 
+  chunk_output_type: console
+bibliography: /Users/pol.van-rijn/MPI/02_running_projects/02_PhD/Papers/dynamic_features/References/library.bib
+---
+<link rel="stylesheet" href="/Users/pol.van-rijn/MPI/04_misc/R/Tufte/extra.css"/>
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(tidy = FALSE, echo=T, results='hide', message=FALSE)
+```
+
+The first step is to note the gender of all speakers:
+
+```{r}
+library(stringr)
+library(dplyr)
+library(contouR)
+library(ggplot2)
+library(hqmisc)
+library(mclust)
+```
+
+```{r gender, cache=TRUE}
+path = paste0( Sys.getenv("PT_DIR"), "Corpora/")
+plot_folder = paste0( Sys.getenv("PT_DIR"), "Results/01_F0_densities_by_speaker/")
+source(paste0( Sys.getenv("PT_DIR"), "Scripts/99_helpers/corpus_meta.R"))
+gender_per_corpus = get_gender_for_corpus()
+```
+
+Now we can go though each speaker in each corpus and take the two $\mu$ above and below the mean. This is done for each speaker for each each emotion separately.
+
+```{r percentiles, cache=TRUE}
+corpora = c('PELL','CREMA-D', 'RAVDESS', 'SAVEE', 'TESS')
+all_estimates = NULL
+for (corpus in corpora){
+  # Create plot folder
+  corpus_plot_folder = paste0(plot_folder, corpus, "/")
+  dir.create(corpus_plot_folder)
+  
+  # DF for all pitch values
+  all_sp = NULL
+  
+  # Get all PitchTiers
+  pt_dir = paste0(path, corpus, "/PitchTiers/01_wide")
+  setwd(pt_dir)
+  files = list.files(pt_dir)
+  files = files[grep('.PitchTier', files)]
+  
+  # Get speaker and emotion
+  speakers = str_split_fixed(files, "_", 2)[,1]
+  emotions = str_split_fixed(files, "_", 3)[,2]
+  unique_emo = unique(emotions)
+  unique_sp = unique(speakers)
+  total_sp = length(unique_sp)
+  
+  # Convert files to DF
+  data_df = data.frame(file = files, speaker = speakers, emotion = emotions)
+  
+  # Initialize progress bar
+  pb = txtProgressBar()
+  sp_count = 0
+  
+  for (sp in unique_sp){
+    sp_count = sp_count + 1
+
+    # Make a global collection across emotions for each speaker
+    all_F0 = c()
+    for (fn in filter(data_df, speaker == sp)$file){
+      pt = read_PitchTier(paste0(pt_dir, "/", fn))
+      all_F0 = c(all_F0, hqmisc::f2st(pt$f))
+    }
+    all_sp = rbind(all_sp, data.frame(
+      speaker = sp,
+      f = all_F0,
+      emotion = 'combined'
+    ))
+    
+    # Collection of pitch values for each speaker AND emotion
+    for (emo in unique_emo){
+      pitch_values = c()
+      for (fn in filter(data_df, speaker == sp, emotion == emo)$file){
+        pt = read_PitchTier(paste0(pt_dir, "/", fn))
+        pitch_values = c(pitch_values, pt$f)
+      }
+
+      pitch_values = f2st(pitch_values)
+      df = as.data.frame(pitch_values)
+      ceiling = mean(pitch_values) + 2*sd(pitch_values)
+      aprox_floor = mean(pitch_values) - 2*sd(pitch_values)
+
+      if (sp %in% gender_per_corpus[[corpus]]$males){
+        # As a reference the floor used in PELL
+        floor = 70
+      } else{
+        floor = 120
+      }
+
+      # ggplot(df, aes(x=pitch_values)) +
+      #   geom_histogram(aes(y=..density..), colour="black", fill="white", bins=50)+
+      #   geom_density(alpha=.2, fill="#FF6666") +
+      #   ggtitle(paste("Pitch range estimation:", sp, emo)) +
+      #   annotate("text", x=mean(pitch_values) + 2, label=paste("Mean\n", floor(st2f(mean(pitch_values))), "Hz"), y=Inf, colour="blue", vjust=1.5) +
+      #   geom_vline(aes(xintercept=mean(pitch_values)), color="blue", linetype="dashed", size=1) +
+      #   geom_vline(xintercept=ceiling, colour="red") +
+      #   annotate("text", x=ceiling + 0.5, label=paste("Pitch ceiling\n", floor(st2f(ceiling)), "Hz"), y=Inf, colour="red", hjust = 0, vjust=1.5) +
+      #   geom_vline(xintercept=aprox_floor, colour="red") +
+      #   annotate("text", x=aprox_floor + 0.5, label=paste("Aprox. pitch floor\n", floor(st2f(aprox_floor)), "Hz"), y=Inf, colour="red", hjust = 0, vjust=1.5) +
+      #   annotate("text", x=f2st(floor) + 0.5, label=paste("Used pitch floor\n", floor, "Hz"), y=Inf,, colour="green", hjust = 0, vjust=1.5) +
+      #   geom_vline(xintercept=f2st(floor), colour="green") +
+      #   xlab("F0 (St)") +
+      #   ylab("Frequency")
+      # 
+      # ggsave(paste0(corpus_plot_folder, "density_", sp, "_", emo, ".pdf"))
+
+      # Add results
+      all_sp = rbind(all_sp, data.frame(
+        speaker = sp,
+        f = pitch_values,
+        emotion = emo
+      ))
+    }
+    setTxtProgressBar(pb, sp_count/total_sp)
+  }
+  close(pb)
+
+  # Plot densities by speaker  
+  ggplot(filter(all_sp, emotion == "combined")) +
+    geom_density(aes(x = f)) +
+    facet_wrap(~ speaker) +
+    ggtitle("Speaker F0 density")
+  ggsave(paste0(plot_folder, "density_by_speaker_", corpus, ".pdf"))
+  
+  # Create floor and ceiling estimate
+  estimate = as.data.frame(all_sp %>% group_by(speaker, emotion) %>% summarise(floor = mean(f) - 2*sd(f), ceiling = mean(f) + 2*sd(f)))
+  estimate$corpus = corpus
+
+  estimate$gender = unlist(
+    lapply(estimate$speaker, function(x){
+      if (x %in% gender_per_corpus[[corpus]]$males){
+        return("M")
+      } else{
+        return("F")
+      }
+    })
+  )
+
+  all_estimates = rbind(all_estimates, estimate)
+}
+
+est_by_emotion_sp = filter(all_estimates, emotion != "combined")
+est_by_sp = filter(all_estimates, emotion == "combined")
+write.csv(all_estimates, paste0(plot_folder, "all_estimates.csv"))
+```
+
+We expect that the floor should differ as a function of sex. We do see on average male participants have a lower floor than female participants (Fig 1).
+
+```{r gender_box_plot, fig.margin = TRUE, fig.cap = "Fig 1. Estimated pitch floor across genders and corpora.", fig.width=5, fig.height=3.5, cache=TRUE}
+
+est_by_sp$floor_f = st2f(est_by_sp$floor)
+est_by_emotion_sp$floor_f = st2f(est_by_emotion_sp$floor)
+
+ggplot(est_by_sp) +
+  geom_boxplot(aes(x = corpus, y = floor)) +
+  facet_wrap(~ gender)
+```
+
+
+However, if we take a closer look, we find quite some overlap between the sexes (especially in *CREMA-D*, Fig 2).
+
+
+```{r gender_density_plot, fig.margin = TRUE, fig.cap = "Fig 2. Overlap between estimated pitch floor across genders in corpora.", fig.width=5, fig.height=3.5, cache=TRUE}
+ggplot(est_by_sp) +
+  geom_density(aes(x = floor_f, fill = gender),  alpha = 0.5) +
+  facet_wrap(~ corpus)
+```
+
+
+Also the distribution of pitch floors is somewhat different across the emotions.
+
+
+```{r densities_emotions, cache=TRUE}
+ggplot(est_by_emotion_sp) +
+  geom_density(aes(x = floor_f)) +
+  facet_wrap(~ emotion)
+```
+
+
+A possible way to solve this problem is to divide the distribution into subgroups. We can assess this with latent profile analysis (LPA, also Gaussian mixture modelling). We can cluster the floors of emotion $\times$ speaker.
+
+```{r cluster_emo_speaker, fig.margin = TRUE, fig.cap = "Fig 3. Optimally the distribution is split into two groups."}
+BIC = mclustBIC(est_by_emotion_sp$floor)
+plot(BIC)
+est_by_emotion_sp$classification = as.factor(Mclust(est_by_emotion_sp$floor, modelNames = "E", G = 2, x = BIC)$classification)
+```
+
+In Fig 3 we can see the distribution is optimally split into two subgroups
+
+```{r plot_emo_speaker_floors, fig.margin = TRUE, fig.cap = "Fig 4. Overall distribution of floors across all corpora.", cache=TRUE}
+ggplot(est_by_emotion_sp) +
+   geom_density(aes(x = floor_f, fill = "Overall density"), alpha = 0.3)
+```
+
+```{r plot_emo_speaker_gender, fig.margin = TRUE, fig.cap = "Fig 5. Two groups proposed by LPA.", cache=TRUE}
+ggplot(est_by_emotion_sp) +
+   geom_density(aes(x = floor_f, fill = classification), alpha = 0.3)
+```
+
+When we compare Fig 5 with 6, we see the grouping is not specific to a gender.
+
+```{r plot_emo_speaker, fig.margin = TRUE, fig.cap = "Fig 6. Two groups split by gender.", cache=TRUE}
+ggplot(est_by_emotion_sp) +
+   geom_density(aes(x = floor_f, fill = gender), alpha = 0.3)
+```
+
+The analysis done until now was on floors computed on each speaker and emotion separately, however the overal pitch floor must stay constant within a speaker. In order to asses this we can redo the above analysis on pitch floor estimations on speakers across all emotions.
+
+```{r cluster_speaker, fig.margin = TRUE, fig.cap = "Fig 7. Optimally the distribution is split into one or two groups.", cache=TRUE}
+BIC = mclustBIC(est_by_sp$floor)
+plot(BIC)
+est_by_sp$classification = as.factor(Mclust(est_by_sp$floor, modelNames = "E", G = 2, x = BIC)$classification)
+```
+
+Overall Fig 8. reproduces what we've seen so far, however there is a less good cut between the groups, however there are also way less floor estimations per speaker. The border between two categories lies at 100 Hz (Fig 5) or 90 Hz (Fig 6)
+
+```{r plot_speaker, fig.margin = TRUE, fig.show='hold',  fig.cap = "Fig 8. Distribution split by categories and gender.", cache=TRUE}
+ggplot(est_by_sp) +
+  geom_density(aes(x = floor_f, fill = classification), alpha = 0.3)
+ggplot(est_by_sp) +
+  geom_density(aes(x = floor_f, fill = gender), alpha = 0.3)
+```
+
+We can take a look at the distribution of group 1, we'll set the floor to 60 Hz, which matches to the first quantile.
+
+```{r floor_group1_summary, cache=TRUE, results=''}
+summary(est_by_sp[est_by_sp$classification == 1, "floor_f"])
+summary(est_by_sp[est_by_sp$classification == 2, "floor_f"])
+```
+
+
+```{r floor_group}
+floors = est_by_sp$floor_f
+est_by_sp$group = 100
+est_by_sp$group[floors < 100] = 60
+est_by_sp$group = as.factor(est_by_sp$group)
+```
+
+The borders fit fairly well to the LPA classes:
+
+```{r LPA_sp_plot, fig.margin = TRUE, fig.show='hold',  fig.cap = "Fig 9. These floors work fairly well for the distribution.", cache=TRUE}
+picked_floors = as.numeric(levels(est_by_sp$group))
+ggplot(est_by_emotion_sp) +
+  geom_density(aes(x = floor_f, fill = classification), alpha = 0.3) +
+  geom_vline(xintercept = picked_floors)
+ 
+ggplot(est_by_sp) +
+  geom_density(aes(x = floor_f, fill = classification), alpha = 0.3) +
+  geom_vline(xintercept = picked_floors)
+```
+
+The picture does not look very different if we now group the data by the borders:
+
+```{r group_sp_plot}
+ggplot(est_by_sp) +
+  geom_density(aes(x = floor_f, fill = group), alpha = 0.3)
+```
+
+We can see that the floor 'group' largely matches with the gender distribution in the corpora, except for *CREMA-D*. But this corpus already showed a large overlap across the sexes (Fig 2.).
+
+```{r distribution_groups_corpus, fig.fullwidth = TRUE, fig.width = 10, fig.height = 2, fig.cap = "Pitch floor groups across corpora.", cache=TRUE}
+ggplot(est_by_sp %>% group_by(corpus, group) %>% summarise(count = length(group))) +
+  geom_bar(aes(x = group, y = count, fill=group), stat="identity") +
+  theme(
+    axis.title.x=element_blank(),
+    axis.text.x=element_blank(),
+    axis.ticks.x=element_blank()
+  ) +
+  facet_grid(~ corpus, scales = "free_y")
+
+```
+
+```{r distribution_gender_corpus, fig.fullwidth = TRUE, fig.width = 10, fig.height = 2, fig.cap = "Gender distribution across corpora.", cache=TRUE}
+ggplot(est_by_sp %>% group_by(corpus, gender) %>% summarise(count = length(gender))) +
+  geom_bar(aes(x = gender, y = count, fill=gender), stat="identity") +
+  theme(
+    axis.title.x=element_blank(),
+    axis.text.x=element_blank(),
+    axis.ticks.x=element_blank()
+  ) +
+  facet_grid(~ corpus, scales = "free_y")
+```
+
+We can also see that the floor grouping is rather conservative, i.e. the group floor is below the estimated floor for a specific emotion abd speaker.
+
+```{r floor_diff, cache=TRUE}
+get_floor_for_speaker = function(sp, corp){
+  filter(est_by_sp, speaker == sp, corpus == corp)$group
+}
+
+est_by_emotion_sp$floor_estimation = as.numeric(
+  as.character(
+    unlist(
+      lapply(1:nrow(est_by_emotion_sp), function(x){
+        get_floor_for_speaker(est_by_emotion_sp[x, "speaker"], est_by_emotion_sp[x, "corpus"])
+      }
+      )
+    )
+  )
+)
+
+est_by_emotion_sp$floor_diff = est_by_emotion_sp$floor_estimation - st2f(est_by_emotion_sp$floor)
+est_by_emotion_sp %>% group_by(corpus) %>% summarise(mean(floor_diff))
+ggplot(est_by_emotion_sp) +
+  geom_boxplot(aes(x = emotion, y = floor_diff))
+```
+
+We can read around 13 % of all group floors are higher than the original estimation
+
+```{r floor_overflow_percentage, results='', cache=TRUE}
+overflow_df = est_by_emotion_sp[est_by_emotion_sp$floor_diff > 0, ]
+print(nrow(overflow_df)/nrow(est_by_emotion_sp))
+```
+
+But in the case of an overestimation, the overestimation in general was not very high $\pm$ 5 Hz.
+
+```{r floor_overflow_plot, results='', cache=TRUE}
+ggplot(overflow_df) +
+  geom_boxplot(aes(x = emotion, y = floor_diff))
+```
+
+The last thing we would need to check is, if the floor is always lower than any of the ceilings:
+
+```{r, results=''}
+est_by_emotion_sp$gap = st2f(est_by_emotion_sp$ceiling) - est_by_emotion_sp$floor_estimation
+ggplot(est_by_emotion_sp) +
+  geom_boxplot(aes(x = emotion, y = gap))
+sort(est_by_emotion_sp$gap)[1:20]
+```
+
+We see that it never happens that the floor is higher than the ceiling. Also we see expected pitch range differences across emotions (e.g. calm prosody has a smaller range than for example surprise).
+
+Before we save, we can have a look at our data. 
+
+```{r, results=''}
+knitr::kable(head(est_by_emotion_sp))
+```
+
+Lastly we select the relevant columns and save our data
+
+```{r, results=''}
+est_by_emotion_sp = est_by_emotion_sp[c('speaker', 'emotion', 'ceiling', 'floor_estimation', 'corpus')]
+names(est_by_emotion_sp)[4] = 'floor'
+
+est_by_emotion_sp$ceiling = ceiling(st2f(est_by_emotion_sp$ceiling))
+
+est_by_emotion_sp$key = paste(est_by_emotion_sp$speaker, est_by_emotion_sp$emotion, sep="_")
+
+# floors = unlist(lapply(1:nrow(est_by_emotion_sp), function(r){
+#   row = est_by_emotion_sp[r, ]
+#   c = row$corpus
+#   sp = row$speaker
+#   return(filter(est_by_sp, corpus == c, speaker == sp)$floor_f)
+# }))
+# est_by_emotion_sp$floor = floor(floors)
+
+knitr::kable(head(est_by_emotion_sp))
+write.csv(est_by_emotion_sp, 'pitch_settings.csv', row.names = F)
+
+for (c in unique(est_by_emotion_sp$corpus)){
+  write.table(filter(est_by_emotion_sp, corpus == c), paste0(path,'/', c, '/PitchTiers/pitch_settings.csv'), row.names = F, sep = "\t", quote = F)
+}
+```
+
+
+The solution presented here is not perfect: 5.9 % of all pitch points deviate more than 5 Hz compared to the manually checked contour. However, the following methods did not improve the estimation:
+
+1. Increase the floor to 70 Hz instead of 60 Hz. This improves the measure to 3.8 %, however this would be cheating, since this is based on knowledge we have on *PELL*.
+1. Another option would be to use different floors for speakers, however this only slightly improves the benchmark (5.6 %).
+1. The remaining option is to apply the floor algorithm as suggested by Hirst:
+  * De Looze suggests to use a pitch floor of 50 and a ceiling of 700 Hz [@LoozeHirst2008], however this gives us the same performance (5.9 %)
+  * A few years later Hirst proposes to use 60 and 750 Hz respectively, however this even makes performance worse (8.6 %) [@Hirst2011]
+
+```{r, results='', fig.fullwidth = TRUE, fig.width = 10, fig.height = 2}
+knitr::include_graphics("comparison.pdf")
+```
+
+
+
+
+
+
